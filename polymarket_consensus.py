@@ -1,3 +1,4 @@
+import argparse
 import time
 import logging
 import requests
@@ -35,7 +36,7 @@ def fetch_positions(wallet):
         return []
 
 
-def run_pipeline():
+def run_pipeline(threshold=CONSENSUS_THRESHOLD):
     ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     log.info(f"\n{'='*60}")
     log.info(f"=== {ts} ===")
@@ -64,16 +65,23 @@ def run_pipeline():
                 market_info[key] = (p.get("title", "Unknown"), p.get("curPrice", 0))
         if i % 10 == 0:
             log.info(f"  {i}/50 done")
-        time.sleep(0.1)  # gentle rate limiting
+        time.sleep(0.1)
 
-    consensus = [
-        (key, count)
-        for key, wallets_set in position_wallets.items()
-        if (count := len(wallets_set)) >= CONSENSUS_THRESHOLD
-    ]
-    consensus.sort(key=lambda x: x[1], reverse=True)
+    all_sorted = sorted(
+        [(key, len(ws)) for key, ws in position_wallets.items()],
+        key=lambda x: x[1],
+        reverse=True,
+    )
 
-    log.info(f"\nConsensus markets (≥{CONSENSUS_THRESHOLD}/50 traders):\n")
+    log.info(f"\n--- Top 5 markets by consensus (all traders) ---")
+    for (cid, outcome), count in all_sorted[:5]:
+        title, price = market_info.get((cid, outcome), ("Unknown", 0))
+        price_str = f"${price:.2f}" if price else "N/A"
+        log.info(f"  {count}/50  {outcome}  {price_str}  |  {title}")
+
+    consensus = [(key, count) for key, count in all_sorted if count >= threshold]
+
+    log.info(f"\nConsensus markets (≥{threshold}/50 traders):\n")
     if not consensus:
         log.info("  None found.")
     else:
@@ -88,8 +96,12 @@ def run_pipeline():
 if __name__ == "__main__":
     import schedule
 
-    run_pipeline()
-    schedule.every(30).minutes.do(run_pipeline)
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--threshold", type=int, default=CONSENSUS_THRESHOLD)
+    args = parser.parse_args()
+
+    run_pipeline(threshold=args.threshold)
+    schedule.every(30).minutes.do(run_pipeline, threshold=args.threshold)
     while True:
         schedule.run_pending()
         time.sleep(30)

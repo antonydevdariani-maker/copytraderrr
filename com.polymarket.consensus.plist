@@ -1,0 +1,32 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.polymarket.consensus</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>/Users/travisscott/copytraderrr/venv/bin/python3</string>
+        <string>/Users/travisscott/copytraderrr/polymarket_consensus.py</string>
+    </array>
+
+    <key>WorkingDirectory</key>
+    <string>/Users/travisscott/copytraderrr</string>
+
+    <key>StartInterval</key>
+    <integer>3600</integer>
+
+    <key>RunAtLoad</key>
+    <true/>
+
+    <key>StandardOutPath</key>
+    <string>/Users/travisscott/copytraderrr/launchd.log</string>
+
+    <key>StandardErrorPath</key>
+    <string>/Users/travisscott/copytraderrr/launchd.log</string>
+
+    <key>KeepAlive</key>
+    <false/>
+</dict>
+</plist>

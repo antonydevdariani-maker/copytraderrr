@@ -1,12 +1,23 @@
+import argparse
+import os
 import time
 import logging
 import requests
 from collections import defaultdict
-from datetime import datetime
+from datetime import datetime, timezone, timedelta
+from dotenv import load_dotenv
 
-LEADERBOARD_URL = "https://data-api.polymarket.com/v1/leaderboard?timePeriod=MONTH&orderBy=PNL&limit=50"
+load_dotenv()
+
+LEADERBOARD_URL = "https://data-api.polymarket.com/v1/leaderboard?timePeriod=MONTH&orderBy=PNL&limit=50&offset={offset}"
 POSITIONS_URL = "https://data-api.polymarket.com/positions?user={wallet}&sizeThreshold=.1"
+GAMMA_URL = "https://gamma-api.polymarket.com/markets?conditionId={cid}"
 CONSENSUS_THRESHOLD = 15
+LEADERBOARD_TOTAL = 200
+EXPIRY_DAYS = 30
+
+TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
+TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
 
 logging.basicConfig(
     level=logging.INFO,
@@ -20,9 +31,17 @@ log = logging.getLogger(__name__)
 
 
 def fetch_leaderboard():
-    r = requests.get(LEADERBOARD_URL, timeout=15)
-    r.raise_for_status()
-    return [entry["proxyWallet"] for entry in r.json()]
+    wallets = []
+    offset = 0
+    while len(wallets) < LEADERBOARD_TOTAL:
+        r = requests.get(LEADERBOARD_URL.format(offset=offset), timeout=15)
+        r.raise_for_status()
+        page = r.json()
+        if not page:
+            break
+        wallets.extend(entry["proxyWallet"] for entry in page)
+        offset += 50
+    return wallets[:LEADERBOARD_TOTAL]
 
 
 def fetch_positions(wallet):
@@ -35,19 +54,71 @@ def fetch_positions(wallet):
         return []
 
 
-def run_pipeline():
+def is_active_market(cid):
+    try:
+        r = requests.get(GAMMA_URL.format(cid=cid), timeout=15)
+        r.raise_for_status()
+        data = r.json()
+        if not data:
+            return False
+        m = data[0]
+        return m.get("active", False) and not m.get("closed", True)
+    except Exception as e:
+        log.warning(f"  gamma check failed for {cid[:10]}…: {e}")
+        return False
+
+
+def within_expiry(end_date_str):
+    if not end_date_str:
+        return False
+    try:
+        if "T" in end_date_str:
+            end_dt = datetime.fromisoformat(end_date_str.replace("Z", "+00:00"))
+        else:
+            end_dt = datetime.fromisoformat(end_date_str).replace(tzinfo=timezone.utc)
+        now = datetime.now(timezone.utc)
+        return timedelta(0) < (end_dt - now) <= timedelta(days=EXPIRY_DAYS)
+    except Exception:
+        return False
+
+
+def send_telegram_alert(markets, total_wallets):
+    if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
+        return
+    lines = ["🔥 *Polymarket Consensus Alert*", ""]
+    for m in markets[:10]:
+        lines.append(f"*{m['title']}*")
+        lines.append(f"{m['count']}/{total_wallets} {m['outcome']}  |  price: ${m['price']:.2f}")
+        lines.append(f"Ends: {m['end_date']}")
+        lines.append(m["url"])
+        lines.append("")
+    url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
+    payload = {
+        "chat_id": TELEGRAM_CHAT_ID,
+        "text": "\n".join(lines),
+        "parse_mode": "Markdown",
+        "disable_web_page_preview": True,
+    }
+    try:
+        r = requests.post(url, json=payload, timeout=10)
+        r.raise_for_status()
+        log.info("Telegram alert sent.")
+    except Exception as e:
+        log.warning(f"Telegram alert failed: {e}")
+
+
+def run_pipeline(threshold=CONSENSUS_THRESHOLD):
     ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     log.info(f"\n{'='*60}")
     log.info(f"=== {ts} ===")
     log.info(f"{'='*60}")
 
-    log.info("Fetching leaderboard…")
+    log.info(f"Fetching top {LEADERBOARD_TOTAL} wallets…")
     wallets = fetch_leaderboard()
-    log.info(f"Got {len(wallets)} wallets")
+    total = len(wallets)
+    log.info(f"Got {total} wallets")
 
-    # (conditionId, outcome) → set of wallets
     position_wallets = defaultdict(set)
-    # (conditionId, outcome) → (title, curPrice)
     market_info = {}
 
     log.info("Fetching positions…")
@@ -56,40 +127,88 @@ def run_pipeline():
         for p in positions:
             cid = p.get("conditionId")
             outcome = p.get("outcome", "").upper()
-            if not cid or not outcome:
+            price = p.get("curPrice", 0)
+            end_date = p.get("endDate", "")
+            if not cid or not outcome or not price:
+                continue
+            if not within_expiry(end_date):
                 continue
             key = (cid, outcome)
             position_wallets[key].add(wallet)
             if key not in market_info:
-                market_info[key] = (p.get("title", "Unknown"), p.get("curPrice", 0))
-        if i % 10 == 0:
-            log.info(f"  {i}/50 done")
-        time.sleep(0.1)  # gentle rate limiting
+                market_info[key] = {
+                    "title": p.get("title", "Unknown"),
+                    "price": price,
+                    "event_slug": p.get("eventSlug", ""),
+                    "end_date": end_date[:10],
+                    "cid": cid,
+                }
+        if i % 50 == 0:
+            log.info(f"  {i}/{total} done")
+        time.sleep(0.05)
 
-    consensus = [
-        (key, count)
-        for key, wallets_set in position_wallets.items()
-        if (count := len(wallets_set)) >= CONSENSUS_THRESHOLD
-    ]
-    consensus.sort(key=lambda x: x[1], reverse=True)
+    all_sorted = sorted(
+        [(key, len(ws)) for key, ws in position_wallets.items()],
+        key=lambda x: x[1],
+        reverse=True,
+    )
 
-    log.info(f"\nConsensus markets (≥{CONSENSUS_THRESHOLD}/50 traders):\n")
+    candidates = [(key, count) for key, count in all_sorted if count >= max(threshold // 2, 2)]
+    log.info(f"\nValidating {len(candidates)} candidates against gamma API…")
+    validated = []
+    checked_cids = {}
+
+    for key, count in candidates:
+        cid = market_info[key]["cid"]
+        if cid not in checked_cids:
+            checked_cids[cid] = is_active_market(cid)
+            time.sleep(0.05)
+        if checked_cids[cid]:
+            validated.append((key, count))
+
+    log.info(f"\n--- Top 5 active markets ending <=30 days ---")
+    if not validated:
+        log.info("  None found.")
+    for (cid, outcome), count in validated[:5]:
+        m = market_info[(cid, outcome)]
+        log.info(f"  {count}/{total}  {outcome}  ${m['price']:.2f}  ends {m['end_date']}  |  {m['title']}")
+
+    consensus = [(key, count) for key, count in validated if count >= threshold]
+
+    log.info(f"\nConsensus markets (>={threshold}/{total} traders):\n")
+    alerts = []
     if not consensus:
         log.info("  None found.")
     else:
         for (cid, outcome), count in consensus:
-            title, price = market_info.get((cid, outcome), ("Unknown", 0))
-            price_str = f"${price:.2f}" if price else "N/A"
-            log.info(f"  {title}")
-            log.info(f"    {count}/50 {outcome}  |  price: {price_str}")
+            m = market_info[(cid, outcome)]
+            url = f"https://polymarket.com/event/{m['event_slug']}" if m["event_slug"] else "https://polymarket.com"
+            log.info(f"  {m['title']}")
+            log.info(f"    {count}/{total} {outcome}  |  price: ${m['price']:.2f}  |  ends {m['end_date']}")
+            log.info(f"    {url}")
             log.info("")
+            alerts.append({
+                "title": m["title"],
+                "count": count,
+                "outcome": outcome,
+                "price": m["price"],
+                "end_date": m["end_date"],
+                "url": url,
+            })
+
+    if alerts:
+        send_telegram_alert(alerts, total)
 
 
 if __name__ == "__main__":
     import schedule
 
-    run_pipeline()
-    schedule.every(30).minutes.do(run_pipeline)
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--threshold", type=int, default=CONSENSUS_THRESHOLD)
+    args = parser.parse_args()
+
+    run_pipeline(threshold=args.threshold)
+    schedule.every(60).minutes.do(run_pipeline, threshold=args.threshold)
     while True:
         schedule.run_pending()
         time.sleep(30)

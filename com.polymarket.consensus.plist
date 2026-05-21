@@ -20,6 +20,9 @@
     <key>RunAtLoad</key>
     <true/>
 
+    <key>NetworkState</key>
+    <true/>
+
     <key>StandardOutPath</key>
     <string>/Users/travisscott/copytraderrr/launchd.log</string>
 

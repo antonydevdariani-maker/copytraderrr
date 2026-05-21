@@ -204,4 +204,14 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--threshold", type=int, default=CONSENSUS_THRESHOLD)
     args = parser.parse_args()
+
+    # wait for network on boot (launchd starts before DNS is ready)
+    for attempt in range(10):
+        try:
+            requests.get("https://data-api.polymarket.com", timeout=5)
+            break
+        except Exception:
+            log.info(f"Waiting for network… attempt {attempt + 1}/10")
+            time.sleep(15)
+
     run_pipeline(threshold=args.threshold)

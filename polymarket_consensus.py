@@ -201,14 +201,7 @@ def run_pipeline(threshold=CONSENSUS_THRESHOLD):
 
 
 if __name__ == "__main__":
-    import schedule
-
     parser = argparse.ArgumentParser()
     parser.add_argument("--threshold", type=int, default=CONSENSUS_THRESHOLD)
     args = parser.parse_args()
-
     run_pipeline(threshold=args.threshold)
-    schedule.every(60).minutes.do(run_pipeline, threshold=args.threshold)
-    while True:
-        schedule.run_pending()
-        time.sleep(30)

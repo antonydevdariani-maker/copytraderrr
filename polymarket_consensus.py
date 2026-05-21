@@ -12,7 +12,8 @@ load_dotenv()
 LEADERBOARD_URL = "https://data-api.polymarket.com/v1/leaderboard?timePeriod=MONTH&orderBy=PNL&limit=50"
 POSITIONS_URL = "https://data-api.polymarket.com/positions?user={wallet}&sizeThreshold=.1"
 CONSENSUS_THRESHOLD = 15
-DISCORD_WEBHOOK_URL = os.getenv("DISCORD_WEBHOOK_URL")
+TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
+TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
 
 logging.basicConfig(
     level=logging.INFO,
@@ -41,22 +42,28 @@ def fetch_positions(wallet):
         return []
 
 
-def send_discord_alert(markets):
-    if not DISCORD_WEBHOOK_URL:
+def send_telegram_alert(markets):
+    if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
         return
-    lines = ["**🔥 Polymarket Consensus Alert**", ""]
+    lines = ["🔥 *Polymarket Consensus Alert*", ""]
     for m in markets:
-        lines.append(f"**{m['title']}**")
-        lines.append(f"> {m['count']}/50 {m['outcome']}  |  price: ${m['price']:.2f}")
-        lines.append(f"> <{m['url']}>")
+        lines.append(f"*{m['title']}*")
+        lines.append(f"{m['count']}/50 {m['outcome']}  |  price: ${m['price']:.2f}")
+        lines.append(m["url"])
         lines.append("")
-    payload = {"content": "\n".join(lines)}
+    url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
+    payload = {
+        "chat_id": TELEGRAM_CHAT_ID,
+        "text": "\n".join(lines),
+        "parse_mode": "Markdown",
+        "disable_web_page_preview": True,
+    }
     try:
-        r = requests.post(DISCORD_WEBHOOK_URL, json=payload, timeout=10)
+        r = requests.post(url, json=payload, timeout=10)
         r.raise_for_status()
-        log.info("Discord alert sent.")
+        log.info("Telegram alert sent.")
     except Exception as e:
-        log.warning(f"Discord webhook failed: {e}")
+        log.warning(f"Telegram alert failed: {e}")
 
 
 def run_pipeline(threshold=CONSENSUS_THRESHOLD):
@@ -112,7 +119,7 @@ def run_pipeline(threshold=CONSENSUS_THRESHOLD):
     consensus = [(key, count) for key, count in active if count >= threshold]
 
     log.info(f"\nConsensus markets (≥{threshold}/50 traders):\n")
-    discord_markets = []
+    alerts = []
     if not consensus:
         log.info("  None found.")
     else:
@@ -123,7 +130,7 @@ def run_pipeline(threshold=CONSENSUS_THRESHOLD):
             log.info(f"    {count}/50 {outcome}  |  price: ${m['price']:.2f}")
             log.info(f"    {url}")
             log.info("")
-            discord_markets.append({
+            alerts.append({
                 "title": m["title"],
                 "count": count,
                 "outcome": outcome,
@@ -131,8 +138,8 @@ def run_pipeline(threshold=CONSENSUS_THRESHOLD):
                 "url": url,
             })
 
-    if discord_markets:
-        send_discord_alert(discord_markets)
+    if alerts:
+        send_telegram_alert(alerts)
 
 
 if __name__ == "__main__":

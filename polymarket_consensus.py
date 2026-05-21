@@ -1,13 +1,18 @@
 import argparse
+import os
 import time
 import logging
 import requests
 from collections import defaultdict
 from datetime import datetime
+from dotenv import load_dotenv
+
+load_dotenv()
 
 LEADERBOARD_URL = "https://data-api.polymarket.com/v1/leaderboard?timePeriod=MONTH&orderBy=PNL&limit=50"
 POSITIONS_URL = "https://data-api.polymarket.com/positions?user={wallet}&sizeThreshold=.1"
 CONSENSUS_THRESHOLD = 15
+DISCORD_WEBHOOK_URL = os.getenv("DISCORD_WEBHOOK_URL")
 
 logging.basicConfig(
     level=logging.INFO,
@@ -36,6 +41,24 @@ def fetch_positions(wallet):
         return []
 
 
+def send_discord_alert(markets):
+    if not DISCORD_WEBHOOK_URL:
+        return
+    lines = ["**🔥 Polymarket Consensus Alert**", ""]
+    for m in markets:
+        lines.append(f"**{m['title']}**")
+        lines.append(f"> {m['count']}/50 {m['outcome']}  |  price: ${m['price']:.2f}")
+        lines.append(f"> <{m['url']}>")
+        lines.append("")
+    payload = {"content": "\n".join(lines)}
+    try:
+        r = requests.post(DISCORD_WEBHOOK_URL, json=payload, timeout=10)
+        r.raise_for_status()
+        log.info("Discord alert sent.")
+    except Exception as e:
+        log.warning(f"Discord webhook failed: {e}")
+
+
 def run_pipeline(threshold=CONSENSUS_THRESHOLD):
     ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     log.info(f"\n{'='*60}")
@@ -48,7 +71,7 @@ def run_pipeline(threshold=CONSENSUS_THRESHOLD):
 
     # (conditionId, outcome) → set of wallets
     position_wallets = defaultdict(set)
-    # (conditionId, outcome) → (title, curPrice)
+    # (conditionId, outcome) → market metadata
     market_info = {}
 
     log.info("Fetching positions…")
@@ -57,12 +80,17 @@ def run_pipeline(threshold=CONSENSUS_THRESHOLD):
         for p in positions:
             cid = p.get("conditionId")
             outcome = p.get("outcome", "").upper()
+            price = p.get("curPrice", 0)
             if not cid or not outcome:
                 continue
             key = (cid, outcome)
             position_wallets[key].add(wallet)
             if key not in market_info:
-                market_info[key] = (p.get("title", "Unknown"), p.get("curPrice", 0))
+                market_info[key] = {
+                    "title": p.get("title", "Unknown"),
+                    "price": price,
+                    "event_slug": p.get("eventSlug", ""),
+                }
         if i % 10 == 0:
             log.info(f"  {i}/50 done")
         time.sleep(0.1)
@@ -73,24 +101,38 @@ def run_pipeline(threshold=CONSENSUS_THRESHOLD):
         reverse=True,
     )
 
-    log.info(f"\n--- Top 5 markets by consensus (all traders) ---")
-    for (cid, outcome), count in all_sorted[:5]:
-        title, price = market_info.get((cid, outcome), ("Unknown", 0))
-        price_str = f"${price:.2f}" if price else "N/A"
-        log.info(f"  {count}/50  {outcome}  {price_str}  |  {title}")
+    # filter: active markets only (price > 0)
+    active = [(key, count) for key, count in all_sorted if market_info[key]["price"] > 0]
 
-    consensus = [(key, count) for key, count in all_sorted if count >= threshold]
+    log.info(f"\n--- Top 5 active markets by consensus ---")
+    for (cid, outcome), count in active[:5]:
+        m = market_info[(cid, outcome)]
+        log.info(f"  {count}/50  {outcome}  ${m['price']:.2f}  |  {m['title']}")
+
+    consensus = [(key, count) for key, count in active if count >= threshold]
 
     log.info(f"\nConsensus markets (≥{threshold}/50 traders):\n")
+    discord_markets = []
     if not consensus:
         log.info("  None found.")
     else:
         for (cid, outcome), count in consensus:
-            title, price = market_info.get((cid, outcome), ("Unknown", 0))
-            price_str = f"${price:.2f}" if price else "N/A"
-            log.info(f"  {title}")
-            log.info(f"    {count}/50 {outcome}  |  price: {price_str}")
+            m = market_info[(cid, outcome)]
+            url = f"https://polymarket.com/event/{m['event_slug']}" if m["event_slug"] else "https://polymarket.com"
+            log.info(f"  {m['title']}")
+            log.info(f"    {count}/50 {outcome}  |  price: ${m['price']:.2f}")
+            log.info(f"    {url}")
             log.info("")
+            discord_markets.append({
+                "title": m["title"],
+                "count": count,
+                "outcome": outcome,
+                "price": m["price"],
+                "url": url,
+            })
+
+    if discord_markets:
+        send_discord_alert(discord_markets)
 
 
 if __name__ == "__main__":

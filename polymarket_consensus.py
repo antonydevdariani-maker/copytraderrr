@@ -91,6 +91,12 @@ def send_telegram_alert(markets, total_wallets):
         lines.append(f"{m['count']}/{total_wallets} {m['outcome']}  |  price: ${m['price']:.2f}")
         lines.append(f"Ends: {m['end_date']}")
         lines.append(m["url"])
+        trader_links = "  ".join(
+            f"[trader {i+1}](https://polymarket.com/profile/{w})"
+            for i, w in enumerate(m.get("wallets", [])[:5])
+        )
+        if trader_links:
+            lines.append(trader_links)
         lines.append("")
     url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
     payload = {
@@ -194,6 +200,7 @@ def run_pipeline(threshold=CONSENSUS_THRESHOLD):
                 "price": m["price"],
                 "end_date": m["end_date"],
                 "url": url,
+                "wallets": list(position_wallets[(cid, outcome)]),
             })
 
     if alerts:

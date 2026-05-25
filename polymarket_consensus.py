@@ -12,7 +12,7 @@ load_dotenv()
 LEADERBOARD_URL = "https://data-api.polymarket.com/v1/leaderboard?timePeriod=MONTH&orderBy=PNL&limit=50&offset={offset}"
 POSITIONS_URL = "https://data-api.polymarket.com/positions?user={wallet}&sizeThreshold=.1"
 GAMMA_URL = "https://gamma-api.polymarket.com/markets?conditionId={cid}"
-CONSENSUS_THRESHOLD = 15
+CONSENSUS_THRESHOLD = 5
 LEADERBOARD_TOTAL = 200
 EXPIRY_DAYS = 30
 
@@ -179,7 +179,7 @@ def run_pipeline(threshold=CONSENSUS_THRESHOLD):
         m = market_info[(cid, outcome)]
         log.info(f"  {count}/{total}  {outcome}  ${m['price']:.2f}  ends {m['end_date']}  |  {m['title']}")
 
-    consensus = [(key, count) for key, count in validated if count >= threshold]
+    consensus = validated  # alert on all active markets with any shared positions
 
     log.info(f"\nConsensus markets (>={threshold}/{total} traders):\n")
     alerts = []

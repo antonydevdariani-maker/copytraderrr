@@ -12,6 +12,7 @@ load_dotenv()
 LEADERBOARD_URL = "https://data-api.polymarket.com/v1/leaderboard?timePeriod=MONTH&orderBy=PNL&limit=50&offset={offset}"
 POSITIONS_URL = "https://data-api.polymarket.com/positions?user={wallet}&sizeThreshold=.1"
 GAMMA_URL = "https://gamma-api.polymarket.com/markets?conditionId={cid}"
+ACTIVITY_URL = "https://data-api.polymarket.com/activity?user={wallet}&limit=500"
 CONSENSUS_THRESHOLD = 5
 LEADERBOARD_TOTAL = 200
 EXPIRY_DAYS = 30
@@ -54,6 +55,16 @@ def fetch_positions(wallet):
         return []
 
 
+def fetch_activity(wallet):
+    try:
+        r = requests.get(ACTIVITY_URL.format(wallet=wallet), timeout=15)
+        r.raise_for_status()
+        return r.json()
+    except Exception as e:
+        log.warning(f"  activity fetch failed for {wallet[:10]}…: {e}")
+        return []
+
+
 def is_active_market(cid):
     try:
         r = requests.get(GAMMA_URL.format(cid=cid), timeout=15)
@@ -90,6 +101,15 @@ def send_telegram_alert(markets, total_wallets):
         lines.append(f"*{m['title']}*")
         lines.append(f"{m['count']}/{total_wallets} {m['outcome']}  |  price: ${m['price']:.2f}")
         lines.append(f"Ends: {m['end_date']}")
+        if m.get("earliest_entry"):
+            from datetime import datetime, timezone
+            earliest = datetime.fromtimestamp(m["earliest_entry"], tz=timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
+            latest = datetime.fromtimestamp(m["latest_entry"], tz=timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
+            if earliest == latest:
+                lines.append(f"First trade: {earliest}")
+            else:
+                lines.append(f"First trade: {earliest}")
+                lines.append(f"Last trade: {latest}")
         lines.append(m["url"])
         trader_links = "  ".join(
             f"[trader {i+1}](https://polymarket.com/profile/{w})"
@@ -126,6 +146,7 @@ def run_pipeline(threshold=CONSENSUS_THRESHOLD):
 
     position_wallets = defaultdict(set)
     market_info = {}
+    trade_timestamps = defaultdict(dict)  # (cid, outcome) -> {wallet: earliest_buy_ts}
 
     log.info("Fetching positions…")
     for i, wallet in enumerate(wallets, 1):
@@ -149,9 +170,24 @@ def run_pipeline(threshold=CONSENSUS_THRESHOLD):
                     "end_date": end_date[:10],
                     "cid": cid,
                 }
+        # fetch activity and record earliest BUY per market
+        activity = fetch_activity(wallet)
+        for a in activity:
+            if a.get("type") != "TRADE" or a.get("side") != "BUY":
+                continue
+            cid = a.get("conditionId")
+            outcome = a.get("outcome", "").upper()
+            ts_val = a.get("timestamp")
+            if not cid or not outcome or not ts_val:
+                continue
+            key = (cid, outcome)
+            if wallet in trade_timestamps[key]:
+                trade_timestamps[key][wallet] = min(trade_timestamps[key][wallet], ts_val)
+            else:
+                trade_timestamps[key][wallet] = ts_val
         if i % 50 == 0:
             log.info(f"  {i}/{total} done")
-        time.sleep(0.05)
+        time.sleep(0.1)
 
     all_sorted = sorted(
         [(key, len(ws)) for key, ws in position_wallets.items()],
@@ -193,6 +229,9 @@ def run_pipeline(threshold=CONSENSUS_THRESHOLD):
             log.info(f"    {count}/{total} {outcome}  |  price: ${m['price']:.2f}  |  ends {m['end_date']}")
             log.info(f"    {url}")
             log.info("")
+            ts_map = trade_timestamps.get((cid, outcome), {})
+            earliest = min(ts_map.values()) if ts_map else None
+            latest = max(ts_map.values()) if ts_map else None
             alerts.append({
                 "title": m["title"],
                 "count": count,
@@ -201,6 +240,8 @@ def run_pipeline(threshold=CONSENSUS_THRESHOLD):
                 "end_date": m["end_date"],
                 "url": url,
                 "wallets": list(position_wallets[(cid, outcome)]),
+                "earliest_entry": earliest,
+                "latest_entry": latest,
             })
 
     if alerts:
